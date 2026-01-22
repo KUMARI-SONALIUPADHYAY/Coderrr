@@ -1,3 +1,4 @@
+const { isPlainQuery, isTaskCommand } = require("./utils/queryClassifier");
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -16,20 +17,7 @@ const { getProvider } = require('./providers');
  */
 
 class Agent {
-  /**
-   * Creates a new Agent instance with configurable options
-   *
-   * @param {Object} options - Configuration options for the agent
-   * @param {string} options.backendUrl - URL of the AI backend service (default: hosted backend)
-   * @param {string} options.workingDir - Working directory for file operations (default: process.cwd())
-   * @param {boolean} options.autoTest - Whether to run tests automatically after successful execution (default: true)
-   * @param {boolean} options.autoRetry - Whether to enable self-healing retry mechanism (default: true)
-   * @param {number} options.maxRetries - Maximum retry attempts per failed step (default: 2)
-   * @param {boolean} options.scanOnFirstRequest - Whether to scan codebase on first request (default: true)
-   * @param {boolean} options.gitEnabled - Whether to enable Git integration features (default: false)
-   */
   constructor(options = {}) {
-    // Default to hosted backend, can be overridden via options or env var
     const DEFAULT_BACKEND = 'https://coderrr-backend.vercel.app';
     this.backendUrl = options.backendUrl || process.env.CODERRR_BACKEND || DEFAULT_BACKEND;
 
@@ -40,45 +28,31 @@ class Agent {
     this.scanner = new CodebaseScanner(this.workingDir);
     this.git = new GitOperations(this.workingDir);
     this.conversationHistory = [];
-    this.autoTest = options.autoTest !== false; // Default to true
-    this.autoRetry = options.autoRetry !== false; // Default to true - self-healing on errors
-    this.maxRetries = options.maxRetries || 2; // Default 2 retries per step
-    this.codebaseContext = null; // Cached codebase structure
-    this.scanOnFirstRequest = options.scanOnFirstRequest !== false; // Default to true
-    this.gitEnabled = options.gitEnabled || false; // Git auto-commit feature (opt-in)
-    this.maxHistoryLength = options.maxHistoryLength || 10; // Max conversation turns to keep
+    this.autoTest = options.autoTest !== false;
+    this.autoRetry = options.autoRetry !== false;
+    this.maxRetries = options.maxRetries || 2;
+    this.codebaseContext = null;
+    this.scanOnFirstRequest = options.scanOnFirstRequest !== false;
+    this.gitEnabled = options.gitEnabled || false;
+    this.maxHistoryLength = options.maxHistoryLength || 10;
 
-    // Load user provider configuration
     this.providerConfig = configManager.getConfig();
   }
 
-  /**
-   * Add a message to conversation history
-   * @param {string} role - 'user' or 'assistant'
-   * @param {string} content - Message content
-   */
   addToHistory(role, content) {
     this.conversationHistory.push({ role, content });
 
-    // Trim history if it exceeds max length (keep most recent)
-    // Each turn = 2 messages (user + assistant), so maxHistoryLength * 2
     const maxMessages = this.maxHistoryLength * 2;
     if (this.conversationHistory.length > maxMessages) {
       this.conversationHistory = this.conversationHistory.slice(-maxMessages);
     }
   }
 
-  /**
-   * Clear conversation history (useful for starting fresh)
-   */
   clearHistory() {
     this.conversationHistory = [];
     ui.info('Conversation history cleared');
   }
 
-  /**
-   * Get formatted conversation history for the backend
-   */
   getFormattedHistory() {
     return this.conversationHistory.map(msg => ({
       role: msg.role,
@@ -86,12 +60,8 @@ class Agent {
     }));
   }
 
-  /**
-   * Send a prompt to the AI backend
-   */
   async chat(prompt, options = {}) {
     try {
-      // Scan codebase on first request if enabled
       if (this.scanOnFirstRequest && !this.codebaseContext) {
         const scanSpinner = ui.spinner('Scanning codebase...');
         scanSpinner.start();
@@ -106,7 +76,6 @@ class Agent {
         }
       }
 
-      // Enhance prompt with codebase context
       let enhancedPrompt = prompt;
       if (this.codebaseContext) {
         const osType = process.platform === 'win32' ? 'Windows' :
@@ -135,7 +104,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
       const spinner = ui.spinner('Thinking...');
       spinner.start();
 
-      // Include conversation history for context continuity
       const requestPayload = {
         prompt: enhancedPrompt,
         temperature: options.temperature || 0.2,
@@ -143,7 +111,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
         top_p: options.top_p || 1.0
       };
 
-      // Add provider configuration if user has configured one
       if (this.providerConfig) {
         requestPayload.provider = this.providerConfig.provider;
         requestPayload.api_key = this.providerConfig.apiKey;
@@ -153,7 +120,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
         }
       }
 
-      // Add conversation history if available (for multi-turn conversations)
       if (this.conversationHistory.length > 0) {
         requestPayload.conversation_history = this.getFormattedHistory();
       }
@@ -166,10 +132,8 @@ For command execution on ${osType}, use appropriate command separators (${osType
         throw new Error(response.data.error);
       }
 
-      // Handle both new format (direct object with explanation/plan) and legacy format (wrapped in response)
       return response.data.response || response.data;
     } catch (error) {
-      // Sanitize error to prevent logging sensitive data
       const sanitized = sanitizeAxiosError(error);
       const userMessage = formatUserError(sanitized, this.backendUrl);
 
@@ -181,47 +145,32 @@ For command execution on ${osType}, use appropriate command separators (${osType
         ui.error(`Failed to communicate with backend: ${userMessage}`);
       }
 
-      // Throw a sanitized error, not the raw Axios error with sensitive data
       throw createSafeError(error);
     }
   }
 
-  /**
-   * Parse JSON from AI response (handles markdown code blocks)
-   */
   parseJsonResponse(text) {
     try {
-      // Try direct JSON parse first
       return JSON.parse(text);
     } catch (e) {
-      // Try to extract JSON from markdown code blocks
       const jsonMatch = text.match(/```json\s*\n([\s\S]*?)\n```/);
       if (jsonMatch) {
         try {
           return JSON.parse(jsonMatch[1]);
-        } catch (e2) {
-          // Fall through
-        }
+        } catch (e2) {}
       }
 
-      // Try to find any JSON object in the text
       const objectMatch = text.match(/\{[\s\S]*\}/);
       if (objectMatch) {
         try {
           return JSON.parse(objectMatch[0]);
-        } catch (e3) {
-          // Fall through
-        }
+        } catch (e3) {}
       }
 
       throw new Error('Could not parse JSON from response');
     }
   }
 
-  /**
-   * Check if an error is retryable (can be fixed by AI) or non-retryable (config/permission issue)
-   * Non-retryable errors should skip AI retry and immediately ask user
-   */
   isRetryableError(errorMessage) {
     const nonRetryablePatterns = [
       /file already exists/i,
@@ -250,43 +199,23 @@ For command execution on ${osType}, use appropriate command separators (${osType
     return !isNonRetryable;
   }
 
-  /**
-   * Execute a plan with self-healing retry mechanism
-   *
-   * This method processes each step in the plan, handling both file operations and command execution.
-   * It includes automatic retry logic for failed steps using AI-generated fixes when enabled.
-   * The retry mechanism distinguishes between retryable errors (logic issues that AI can fix)
-   * and non-retryable errors (permission/config issues that require user intervention).
-   *
-   * @param {Array<Object>} plan - Array of operation objects from AI response
-   * @param {string} plan[].action - Operation type ('create_file', 'update_file', 'patch_file', 'delete_file', 'read_file', 'run_command')
-   * @param {string} plan[].path - File path for file operations
-   * @param {string} plan[].content - File content for create/update operations
-   * @param {string} plan[].command - Shell command for run_command operations
-   * @param {string} plan[].summary - Human-readable description of the step
-   * @returns {Promise<Object>} Execution statistics {completed, total, pending}
-   */
   async executePlan(plan) {
     if (!Array.isArray(plan) || plan.length === 0) {
       ui.warning('No plan to execute');
       return;
     }
 
-    // Parse and display TODOs
     this.todoManager.parseTodos(plan);
     this.todoManager.display();
 
-    // Git pre-execution hook
     if (this.gitEnabled) {
       const gitValid = await this.git.validateGitSetup();
       if (gitValid) {
-        // Check for uncommitted changes
         const canProceed = await this.git.checkUncommittedChanges();
         if (!canProceed) {
           ui.warning('Execution cancelled by user');
           return;
         }
-        // Create checkpoint
         const planDescription = plan[0]?.summary || 'Execute plan';
         await this.git.createCheckpoint(planDescription);
       }
@@ -294,7 +223,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
 
     ui.section('Executing Plan');
 
-    // Execute each step
     for (let i = 0; i < plan.length; i++) {
       const step = plan[i];
       this.todoManager.setInProgress(i);
@@ -307,7 +235,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
       while (!stepSuccess && retryCount <= this.maxRetries) {
         try {
           if (step.action === 'run_command') {
-            // Execute command with permission
             const result = await this.executor.execute(step.command, {
               requirePermission: true,
               cwd: this.workingDir
@@ -316,14 +243,12 @@ For command execution on ${osType}, use appropriate command separators (${osType
             if (!result.success && !result.cancelled) {
               const errorMsg = result.error || result.output || 'Unknown error';
 
-              // Check if this error is retryable (can be fixed by AI)
               if (!this.isRetryableError(errorMsg)) {
                 ui.error(`Non-retryable error: ${errorMsg}`);
                 ui.warning('⚠️  This type of error cannot be auto-fixed (file/permission/config issue)');
-                break; // Don't retry, let the outer loop ask user what to do
+                break;
               }
 
-              // Command failed - attempt self-healing if enabled and error is retryable
               if (this.autoRetry && retryCount < this.maxRetries) {
                 ui.warning(`Command failed (attempt ${retryCount + 1}/${this.maxRetries + 1})`);
                 ui.info('🔧 Analyzing error and generating fix...');
@@ -333,7 +258,7 @@ For command execution on ${osType}, use appropriate command separators (${osType
                 if (fixedStep && this.validateFixedStep(fixedStep)) {
                   Object.assign(step, fixedStep);
                   retryCount++;
-                  continue; // Retry with fixed command
+                  continue;
                 } else {
                   ui.error('Could not generate automatic fix');
                   break;
@@ -346,12 +271,11 @@ For command execution on ${osType}, use appropriate command separators (${osType
 
             if (result.cancelled) {
               ui.warning('Command cancelled by user');
-              stepSuccess = true; // Consider cancelled as completed
+              stepSuccess = true;
             } else {
               stepSuccess = true;
             }
           } else {
-            // File operation
             await this.fileOps.execute(step);
             stepSuccess = true;
           }
@@ -362,11 +286,10 @@ For command execution on ${osType}, use appropriate command separators (${osType
         } catch (error) {
           const errorMsg = error.message || 'Unknown error';
 
-          // Check if this error is retryable (can be fixed by AI)
           if (!this.isRetryableError(errorMsg)) {
             ui.error(`Non-retryable error: ${errorMsg}`);
             ui.warning('⚠️  This type of error cannot be auto-fixed (file/permission/config issue)');
-            break; // Don't retry, let the outer loop ask user what to do
+            break;
           }
 
           if (this.autoRetry && retryCount < this.maxRetries) {
@@ -378,7 +301,7 @@ For command execution on ${osType}, use appropriate command separators (${osType
             if (fixedStep && this.validateFixedStep(fixedStep)) {
               Object.assign(step, fixedStep);
               retryCount++;
-              continue; // Retry with fixed step
+              continue;
             } else {
               ui.error('Could not generate automatic fix');
               break;
@@ -393,7 +316,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
         }
       }
 
-      // If step still failed after retries, ask user what to do
       if (!stepSuccess) {
         const shouldContinue = await ui.confirm('Step failed. Continue with remaining steps?', false);
         if (!shouldContinue) {
@@ -402,7 +324,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
       }
     }
 
-    // Show completion stats
     const stats = this.todoManager.getStats();
     ui.section('Execution Summary');
     ui.success(`Completed: ${stats.completed}/${stats.total} tasks`);
@@ -411,7 +332,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
       ui.warning(`Skipped: ${stats.pending} tasks`);
     }
 
-    // Git post-execution hook - commit if all successful
     if (this.gitEnabled && stats.completed === stats.total && stats.total > 0) {
       const gitValid = await this.git.isGitRepository();
       if (gitValid) {
@@ -423,9 +343,6 @@ For command execution on ${osType}, use appropriate command separators (${osType
     return stats;
   }
 
-  /**
-   * Validate that a fixed step has all required fields for its action type
-   */
   validateFixedStep(fixedStep) {
     if (!fixedStep || typeof fixedStep !== 'object') {
       return false;
@@ -443,12 +360,12 @@ For command execution on ${osType}, use appropriate command separators (${osType
       case 'create_file':
       case 'update_file':
         return typeof fixedStep.path === 'string' && fixedStep.path.trim().length > 0 &&
-               typeof fixedStep.content === 'string';
+          typeof fixedStep.content === 'string';
 
       case 'patch_file':
         return typeof fixedStep.path === 'string' && fixedStep.path.trim().length > 0 &&
-               typeof fixedStep.oldContent === 'string' && fixedStep.oldContent.trim().length > 0 &&
-               typeof fixedStep.newContent === 'string' && fixedStep.newContent.trim().length > 0;
+          typeof fixedStep.oldContent === 'string' && fixedStep.oldContent.trim().length > 0 &&
+          typeof fixedStep.newContent === 'string' && fixedStep.newContent.trim().length > 0;
 
       case 'delete_file':
       case 'read_file':
@@ -457,23 +374,13 @@ For command execution on ${osType}, use appropriate command separators (${osType
       case 'list_dir':
         return typeof fixedStep.path === 'string' && fixedStep.path.trim().length > 0;
 
-      case 'rename_dir':
-        return (typeof fixedStep.path === 'string' && fixedStep.path.trim().length > 0 &&
-                typeof fixedStep.newPath === 'string' && fixedStep.newPath.trim().length > 0) ||
-               (typeof fixedStep.oldPath === 'string' && fixedStep.oldPath.trim().length > 0 &&
-                typeof fixedStep.newPath === 'string' && fixedStep.newPath.trim().length > 0);
-
       default:
         return false;
     }
   }
 
-  /**
-   * Self-healing: Ask AI to fix a failed step
-   */
   async selfHeal(failedStep, errorMessage, attemptNumber) {
     try {
-      // Use the same format as normal requests so it passes backend validation
       const healingPrompt = `The following step failed with an error. Please analyze the error and provide a fixed version of the step.
 
 FAILED STEP:
@@ -488,37 +395,16 @@ ${errorMessage}
 CONTEXT:
 - Working directory: ${this.workingDir}
 - Attempt number: ${attemptNumber + 1}
-- Available files: ${this.codebaseContext ? this.codebaseContext.files.map(f => f.path).slice(0, 10).join(', ') : 'Unknown'}
 
-Please provide ONLY a JSON object with the fixed step. Use the standard plan format:
-{
-  "explanation": "Brief explanation of what went wrong and how you fixed it",
-  "plan": [
-    {
-      "action": "${failedStep.action}",
-      "command": "corrected command if action is run_command",
-      "path": "corrected path if file operation",
-      "content": "corrected content if needed",
-      "oldContent": "old content for patch_file",
-      "newContent": "new content for patch_file",
-      "summary": "updated summary"
-    }
-  ]
-}`;
+Please provide ONLY a JSON object with the fixed step.`;
 
       ui.info('🔧 Requesting fix from AI...');
       const response = await this.chat(healingPrompt);
 
-      // Handle both object response (from new backend) and string response
       const parsed = typeof response === 'object' && response !== null && response.plan
         ? response
         : this.parseJsonResponse(response);
 
-      if (parsed.explanation) {
-        ui.info(`💡 Fix: ${parsed.explanation}`);
-      }
-
-      // Extract the fixed step from the plan array
       if (parsed.plan && parsed.plan.length > 0) {
         return parsed.plan[0];
       }
@@ -530,9 +416,6 @@ Please provide ONLY a JSON object with the fixed step. Use the standard plan for
     }
   }
 
-  /**
-   * Detect and run tests automatically
-   */
   async runTests() {
     ui.section('Running Tests');
 
@@ -547,39 +430,12 @@ Please provide ONLY a JSON object with the fixed step. Use the standard plan for
       { cmd: 'gradle test', file: 'build.gradle' }
     ];
 
-    // Find applicable test command
     let testCommand = null;
     for (const { cmd, file } of testCommands) {
       const filePath = path.join(this.workingDir, file);
       if (fs.existsSync(filePath)) {
         testCommand = cmd;
         break;
-      }
-    }
-
-    if (!testCommand) {
-      const testDirs = ['tests', 'test'];
-      for (const dir of testDirs) {
-        const dirPath = path.join(this.workingDir, dir);
-        if (fs.existsSync(dirPath)) {
-          try {
-            const stats = fs.statSync(dirPath);
-            if (stats.isDirectory()) {
-              const files = fs.readdirSync(dirPath);
-              // Check for JS/TS files -> Jest
-              if (files.some(f => /\.(js|ts|jsx|tsx)$/.test(f))) {
-                testCommand = 'npx jest';
-                break;
-              }
-              if (files.some(f => /\.py$/.test(f))) {
-                testCommand = 'pytest';
-                break;
-              }
-            }
-          } catch (e) {
-            console.log(e);
-          }
-        }
       }
     }
 
@@ -597,7 +453,7 @@ Please provide ONLY a JSON object with the fixed step. Use the standard plan for
     }
 
     const result = await this.executor.execute(testCommand, {
-      requirePermission: false, // Already confirmed above
+      requirePermission: false,
       cwd: this.workingDir
     });
 
@@ -610,9 +466,6 @@ Please provide ONLY a JSON object with the fixed step. Use the standard plan for
     return result;
   }
 
-  /**
-   * Main agent loop - process user request
-   */
   async process(userRequest, options = {}) {
     const { trackHistory = true } = options;
 
@@ -620,24 +473,44 @@ Please provide ONLY a JSON object with the fixed step. Use the standard plan for
       ui.section('Processing Request');
       ui.info(`Request: ${userRequest}`);
 
-      // Add user message to history before processing
+      // ✅ Plain Query Handling (Issue #77)
+      if (isPlainQuery(userRequest) && !isTaskCommand(userRequest)) {
+        ui.section('Response');
+
+        const q = userRequest.trim().toLowerCase();
+
+        if (q.includes("what is coderrr") || q === "coderrr" || q.includes("what is coder")) {
+          console.log(
+            "Coderrr is an AI-powered CLI coding assistant. You can type a request like 'create a login page' or 'fix this bug', and Coderrr will generate a plan and help you update files or run commands safely."
+          );
+        } else if (q.includes("how to use") && q.includes("coderrr")) {
+          console.log(
+            "To use Coderrr, run it in your terminal and type your request. Example: 'create a simple HTML CSS JS webpage'. Coderrr will show a plan and ask permission before running commands."
+          );
+        } else {
+          console.log(
+            `You asked: "${userRequest}".\nThis is a plain query, so Coderrr will answer directly (no plan execution).`
+          );
+        }
+
+        ui.space();
+        ui.success("No tasks generated (plain query). Nothing to execute.");
+        return;
+      }
+
       if (trackHistory) {
         this.addToHistory('user', userRequest);
       }
 
-      // Get AI response
       const response = await this.chat(userRequest);
 
-      // Try to parse JSON plan - handle both object responses (new backend) and string responses
       let plan;
       let explanation = '';
       try {
-        // If response is already an object with explanation/plan, use it directly
         const parsed = typeof response === 'object' && response !== null && response.plan
           ? response
           : this.parseJsonResponse(response);
 
-        // Show explanation if present
         if (parsed.explanation) {
           explanation = parsed.explanation;
           ui.section('Plan');
@@ -646,18 +519,16 @@ Please provide ONLY a JSON object with the fixed step. Use the standard plan for
         }
 
         plan = parsed.plan;
-        // ✅ Fix: Handle plain queries (no plan / empty plan)
-if (!Array.isArray(plan) || plan.length === 0) {
-  ui.section('Response');
-  console.log(explanation || response);
-  ui.space();
 
-  ui.success('No tasks generated (plain query). Nothing to execute.');
-  return;
-}
+        if (!Array.isArray(plan) || plan.length === 0) {
+          ui.section('Response');
+          console.log(explanation || response);
+          ui.space();
 
+          ui.success('No tasks generated. Nothing to execute.');
+          return;
+        }
 
-        // Add assistant response to history (summarized for context efficiency)
         if (trackHistory) {
           const historySummary = explanation ||
             `Executed ${plan?.length || 0} step(s): ${plan?.map(s => s.summary || s.action).join(', ')}`;
@@ -667,7 +538,6 @@ if (!Array.isArray(plan) || plan.length === 0) {
         ui.warning('Could not parse structured plan from response');
         console.log(response);
 
-        // Still add to history even if parsing failed
         if (trackHistory) {
           this.addToHistory('assistant', response.substring(0, 500));
         }
@@ -677,14 +547,11 @@ if (!Array.isArray(plan) || plan.length === 0) {
           return;
         }
 
-        // No structured plan available
         return;
       }
 
-      // Execute the plan
       const stats = await this.executePlan(plan);
 
-      // Run tests if all tasks completed successfully
       if (this.autoTest && stats.completed === stats.total && stats.total > 0) {
         await this.runTests();
       }
@@ -698,9 +565,6 @@ if (!Array.isArray(plan) || plan.length === 0) {
     }
   }
 
-  /**
-   * Interactive mode - continuous conversation with history
-   */
   async interactive() {
     ui.showBanner();
     ui.info('Interactive mode - Type your requests or "exit" to quit');
@@ -716,7 +580,6 @@ if (!Array.isArray(plan) || plan.length === 0) {
 
       const command = request.toLowerCase().trim();
 
-      // Handle special commands
       if (command === 'exit' || command === 'quit') {
         ui.info('Goodbye! 👋');
         break;
@@ -767,17 +630,12 @@ if (!Array.isArray(plan) || plan.length === 0) {
       try {
         await this.process(request);
       } catch (error) {
-        // Error is already handled and displayed in process()
-        // Just continue the interactive loop without crashing
         ui.warning('You can continue with a new request or type "exit" to quit.');
       }
       ui.space();
     }
   }
 
-  /**
-   * Manually refresh codebase scan
-   */
   refreshCodebase() {
     ui.info('Refreshing codebase scan...');
     this.scanner.clearCache();
@@ -787,16 +645,10 @@ if (!Array.isArray(plan) || plan.length === 0) {
     return scanResult;
   }
 
-  /**
-   * Find files by name or pattern
-   */
   findFiles(searchTerm) {
     return this.scanner.findFiles(searchTerm);
   }
 
-  /**
-   * Get codebase summary
-   */
   getCodebaseSummary() {
     if (!this.codebaseContext) {
       const scanResult = this.scanner.scan();
